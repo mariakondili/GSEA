@@ -1,0 +1,343 @@
+---
+title :
+Author: Maria Kondili
+Date: October 2022
+output:
+  html_document :
+    toc: true
+    highlight: tango
+    df_print: paged
+editor_options:
+  chunk_output_type: console
+---
+
+### Subject: Explore GSEA using genes from proteomics data
+
+```{r}
+
+suppressPackageStartupMessages(library(tidyverse))
+suppressPackageStartupMessages(library(AnnotationDbi))
+suppressPackageStartupMessages(library(clusterProfiler))
+suppressPackageStartupMessages(library(pathview))
+suppressPackageStartupMessages(library(enrichplot))
+suppressPackageStartupMessages(library(org.Hs.eg.db))
+suppressPackageStartupMessages(library(DOSE))
+suppressPackageStartupMessages(library(data.table))
+suppressPackageStartupMessages(library(fgsea))
+library(here)
+```
+
+
+
+```{r}
+
+proj_dir <- here()
+
+setwd(proj_dir)
+
+dir.create("GSEA_Output/",showWarnings = FALSE)
+
+```
+
+### Read INPUT from "Stats" table of 3P5-proteomics platform
+
+- ALL
+
+```{r}
+
+all_surnag_stats <- readr::read_delim("Data/All/Surnageant_All_Proteins_Secretome_Stats.txt",delim="\t",col_names = T)
+all_culot_stats  <- readr::read_delim("Data/All/Culots_All_Proteins_Secretome_Stats.txt",delim="\t",col_names = T)
+
+
+cat("Totally the supernatant proteins measured are : \n")
+nrow(all_surnag_stats)
+
+cat("Totally the Cellular proteins measured are : \n")
+nrow(all_culot_stats)
+
+```
+
+### PATHWAYS  analysis
+
+```{r}
+pathw_dir="~/MSigDB_Hallmark_Pathways/"
+
+analyse_gsea <- function(input_data, pathw_dir, source="Surnageant"){
+
+  gsea_genes <- input_data$LGMDvsCTRL_FoldChange
+  names(gsea_genes) <- input_data$Gene_name
+  gsea_genes <- sort(gsea_genes, decreasing=T)
+
+  ###
+  ### Convert in ENTREZ.ID
+  ###
+
+  source("~/myScriptsBank/convert_GeneIds.R")
+  entrezid          <- convert_gene_ids.hs(names(gsea_genes), from="SYMBOL", to="ENTREZID")
+  names(gsea_genes) <- entrezid
+  gsea_genes        <- gsea_genes[-duplicated(names(gsea_genes))]
+
+
+  ###
+  ### FGSEA
+  ###
+
+  c2 <- gmtPathways(paste0(pathw_dir, "C2_curated_gene_sets_Canonical_Pathways_Hs_EntrezIDs.gmt"))
+  c5 <- gmtPathways(paste0(pathw_dir, "C5_ontology_gene_sets_all_2022_Hs_EntrezIDs.gmt"))
+  hm <- gmtPathways(paste0(pathw_dir, "H_Hallmark_gene_sets_all_2022_Hs_EntrezIDs.gmt"))
+  gseaRes.c2 <- fgsea(c2, gsea_genes)
+  gseaRes.c5 <- fgsea(c5, gsea_genes)
+  gseaRes.hm <- fgsea(hm, gsea_genes)
+
+  gseaRes <- bind_rows( gseaRes.c2, gseaRes.c5,gseaRes.hm )
+
+  top_gseaRes <- subset(gseaRes,padj < 0.1)[1:20,]
+
+  #ns_gseaRes <-  subset(gseaRes.all,padj > 0.05)
+
+  g<- ggplot(top_gseaRes,
+             aes(reorder(pathway, NES), NES)) +
+    geom_col(aes(fill= NES>0),size=1.5) +
+    coord_flip() +
+    labs(x="Pathway", y="Normalized Enrichment Score",
+         title= paste0(source, ": All signif Pathways(padj<0.1)")) +
+    theme(axis.text = element_text(size = 7)) +
+    theme(axis.title = element_text(size = 12))
+  print(g)
+
+  return(gseaRes)
+
+}
+```
+
+
+#### RUN function for GSEA :
+
+> ALL :
+
+```{r gsea_all}
+gseaRes.surnag.all <- analyse_gsea(input_data=all_surnag_stats, pathw_dir, source="Surnageant")
+
+gseaRes.cells.all  <- analyse_gsea(input_data=all_culot_stats, pathw_dir, source="Cells")
+
+## Write in tables :
+dir.create("Output",showWarnings = FALSE)
+
+gseaRes.cells.all <- gseaRes.cells.all[order(gseaRes.cells.all$padj,decreasing = F), ]
+#openxlsx::write.xlsx(gseaRes.cells.all, "GSEA_Output/GSEA_pathways_for_Culot_data_All_Proteins.xlsx")
+
+
+gseaRes.surnag.all <- gseaRes.surnag.all[order(gseaRes.surnag.all$padj,decreasing = F),]
+#openxlsx::write.xlsx(gseaRes.surnag.all,"GSEA_Output/GSEA_pathways_for_Surnageant_data_All_Proteins.xlsx")
+```
+
+> POI :
+
+```{r gsea_poi}
+
+poi_surnag_stats <- readr::read_delim("Data/POI/Surnageant_POI_Secretome_Stats.txt",delim="\t",col_names = T)
+
+poi_culot_stats  <- readr::read_delim("Data/POI/Culots_POI_Secretome_Stats.txt",    delim="\t",col_names = T)
+
+
+gseaRes.surnag.poi <- analyse_gsea(input_data = poi_surnag_stats, pathw_dir, source="Surnageant")
+## ! NONE signif !
+
+gseaRes.cells.poi  <- analyse_gsea(input_data = poi_culot_stats,  pathw_dir,  source="Cells")
+
+#openxlsx::write.xlsx(gseaRes.cells.poi , "GSEA_Output/GSEA_pathways_Culots_POI.xlsx")
+
+```
+
+### Cellular-Compartments GO-terms where Culot-proteins are involved :
+
+ >  CC @ Culot
+
+  Cannot search for CC @ Surnageant-POI bcs NO GSEA-Pathways found enriched
+
+```{r cc_for_culot_poi}
+
+gseaRes.cells.poi.GOCC <- gseaRes.cells.poi[which(str_detect(gseaRes.cells.poi$pathway, "GOCC_")),]
+# 310 pathways found
+
+writexl::write_xlsx(gseaRes.cells.poi.GOCC, "GSEA_Output/Cellular_Compartments_of_Culot_Genes_GSEA_results.xlsx")
+
+top_gseaRes.GOCC <- bind_rows(subset(gseaRes.cells.poi.GOCC,NES >  1)[1:10,],
+                              subset(gseaRes.cells.poi.GOCC,NES < -1)[1:10,])
+
+ggplot(top_gseaRes.GOCC[1:30,],
+       aes(reorder(pathway, NES), NES)) +
+      geom_col(aes(fill= NES>0),size=1.5) +
+      coord_flip() +
+      labs(x="Pathway", y="Normalized Enrichment Score",
+           title="Culot:Top GSEA terms ") +
+      theme(axis.text = element_text(size = 7)) +
+      theme(axis.title = element_text(size = 12)  )
+
+```
+
+> CC @ Surnageant-ALL
+
+```{r cc_for_surnag_all}
+
+gseaRes.surnag.all.GOCC <- gseaRes.surnag.all[which(str_detect(gseaRes.surnag.all$pathway, "GOCC_")),]
+
+writexl::write_xlsx(gseaRes.surnag.all.GOCC, "GSEA_Output/Cellular_Compartments_of_Surnageant_Genes_GSEA_results.xlsx")
+
+top_gseaRes.surnag.GOCC <- bind_rows(subset(gseaRes.cells.poi.GOCC,NES >  1)[1:10,],
+                              subset(gseaRes.cells.poi.GOCC,NES < -1)[1:10,])
+
+ggplot(top_gseaRes.surnag.GOCC[1:30,],
+       aes(reorder(pathway, NES), NES)) +
+      geom_col(aes(fill= NES>0),size=1.5) +
+      coord_flip() +
+      labs(x="Pathway", y="Normalized Enrichment Score",
+           title="Surnageant:Top CC-terms ") +
+      theme(axis.text = element_text(size = 7)) +
+      theme(axis.title = element_text(size = 12)  )
+
+```
+
+#### Extract genes/proteins of our data contained in each Gene-Set Enriched:
+
+```{r}
+
+c2 <- gmtPathways(paste0(pathw_dir, "C2_curated_gene_sets_Canonical_Pathways_Hs_EntrezIDs.gmt"))
+c5 <- gmtPathways(paste0(pathw_dir, "C5_ontology_gene_sets_all_2022_Hs_EntrezIDs.gmt"))
+hm <- gmtPathways(paste0(pathw_dir, "H_Hallmark_gene_sets_all_2022_Hs_EntrezIDs.gmt"))
+
+all_pathw <- c(c2,c5,hm)
+
+all_pathw[1:5]
+```
+
+The "all_pathw" gmtPathways contain the pathways with the genes included
+
+We will extract the genes of our Proteomics that are present in the enriched-terms of the protein.data
+
+### Function
+
+```{r function_which_poi_in_pathway}
+
+extract_genes_in_enrichPathways <- function(gseaRes, all_pathw, prot_stats_table,out_filename, write_down=FALSE) {
+
+    source("~/myScriptsBank/convert_GeneIds.R")
+
+    #idx_pathw_match <- which(names(all_pathw) %in% gseaRes$pathway)
+
+    pos_pathw_match        <- match(names(all_pathw),gseaRes$pathway)
+    names(pos_pathw_match) <- seq(1,length(names(all_pathw)))
+    pos_pathw_match        <- pos_pathw_match[- which(is.na(pos_pathw_match))]
+
+    genes_match <- all_pathw[as.integer(names(pos_pathw_match))]
+
+    #length(pos_pathw_match) == length(genes_match)
+
+    ## pathways in list with genes in symbols
+    geneSymbols <- map(genes_match, ~convert_gene_ids.hs(.x, from="ENTREZID",to="SYMBOL"))
+
+    names(geneSymbols) <- names(genes_match)
+
+    ## find which genes of Proteomics-dataset are included in enriched pathways:
+    geneSymbols_match <- map(geneSymbols,
+                            ~(prot_stats_table$Gene_name[which(prot_stats_table$Gene_name %in% .x)]))
+    ##>transform in Data-frame:
+    genes_in_pathw_df <- data.frame("pathway"= names(geneSymbols_match))
+
+    genesets_colaps <- purrr::map(geneSymbols_match, ~(paste(.x,collapse=",")))
+
+    genes_in_pathw_df <- mutate(genes_in_pathw_df,
+                                "my_geneset" = unlist(genesets_colaps),
+                                "padj"= gseaRes$padj[pos_pathw_match],
+                                "NES"=  gseaRes$NES[pos_pathw_match])
+
+    #> many pathways without Our genes matching -> remove
+    genes_in_pathw_df  <- subset(genes_in_pathw_df, my_geneset != "")
+
+    if (write_down == TRUE) {
+      writexl::write_xlsx(genes_in_pathw_df, out_filename)
+      #write_delim(genes_in_pathw_df, file=out_filename,delim="\t",col_names=T)
+      cat("\nFinal Table with Pathways and Genes has been saved at : \n")
+      cat(out_filename)
+    }
+
+    return( genes_in_pathw_df)
+}
+
+```
+
+> for Surnageant-Proteins :
+
+```{r call_fun_surnag_poi}
+
+extract_genes_in_enrichPathways(gseaRes.surnag.all, all_pathw, poi_surnag_stats,
+                                out_filename = "GSEA_Output/POI_Genes_Surnageant_in_GSEA_pathways.xlsx",
+                                write_down = T )
+
+```
+
+>> Surnageant proteins involved in: "Exosome", "Phagocytosis", "Autophagy" Pathways
+
+```{r}
+
+gseaRes.surnag.exo <- gseaRes.surnag.all[which(str_detect(gseaRes.surnag.all$pathway,
+                                              "EXTRACELLULAR|EXOSOM|AUTOPHAG|PHAGOCYTOS")),]
+
+which(gseaRes.surnag.exo$padj < 0.1 )
+#! None Signif !
+
+ggplot(gseaRes.surnag.exo[1:30,],
+       aes(reorder(pathway, NES), NES)) +
+      geom_col(aes(fill= NES>0),size=1.5) +
+      coord_flip() +
+      labs(x="Pathway", y="Normalized Enrichment Score",
+           title="Surnageant:Top GSEA terms of Exosome ") +
+      theme(axis.text = element_text(size = 7)) +
+      theme(axis.title = element_text(size = 12))
+
+
+## Find which Genes/Prot participate :
+surnag_genes_in_exo <- extract_genes_in_enrichPathways(gseaRes.surnag.exo, all_pathw, poi_surnag_stats,
+                                  out_filename = "GSEA_Output/POI_Surnageant_in_Exosomes-Phagocytosis.xlsx",
+                                  write_down=T)
+
+
+```
+
+>> Surnageant Proteins involved in: "Adipocytes", "Metabolism of FATTY ACIDS"
+
+```{r}
+
+gseaRes.surnag.adip <- gseaRes.surnag.all[which(str_detect(gseaRes.surnag.all$pathway,
+                                                           "ADIPO|FATTY_ACID|FAT_")),]
+
+#>> ALL-proteins (non signif )
+Surnag_genes_in_FattyAcidsPathw <- extract_genes_in_enrichPathways(gseaRes.surnag.adip, all_pathw, all_surnag_stats,
+                                     out_filename = "GSEA_Output/All_Surnageant_in_Adipocytes-FattyAcids_Pathways.xlsx",
+                                     write_down = T )
+
+#>> POI-proteins
+poi_surnag_in_fattyAcidsPathw <-extract_genes_in_enrichPathways(gseaRes.surnag.adip, all_pathw, poi_surnag_stats,
+                                        out_filename = "GSEA_Output/POI_Surnageant_in_Adipocytes-FattyAcids.xlsx",
+                                        write_down = T )
+
+```
+
+>> Surnageant Proteins in Cell.Compartment :
+
+```{r}
+
+extract_genes_in_enrichPathways(gseaRes.surnag.all.GOCC, all_pathw, poi_surnag_stats,
+                                out_filename = "GSEA_Output/POI_Genes_Surnageant_in_CellulCompartment_Terms.xlsx",
+                                write_down = T )
+
+
+```
+
+
+
+```{r }
+
+sessionInfo()
+
+```
